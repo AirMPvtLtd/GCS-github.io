@@ -18,6 +18,10 @@
             0% { transform: translateY(-100%); }
             100% { transform: translateY(100%); }
         }
+        @keyframes fadeOut {
+            0% { opacity: 1; }
+            100% { opacity: 0; }
+        }
         .stark-bg {
             background: linear-gradient(180deg, #0a0f1a 0%, #1a2633 100%);
             overflow: hidden;
@@ -44,6 +48,9 @@
             box-shadow: 0 0 25px rgba(255, 75, 0, 1);
             transform: scale(1.05);
         }
+        .confirmation {
+            animation: fadeOut 3s forwards;
+        }
     </style>
 </head>
 <body class="stark-bg text-white font-mono min-h-screen relative">
@@ -59,10 +66,12 @@
                 m1: 0, m2: 0, m3: 0, m4: 0, warnings: []
             });
             const [displayLogs, setDisplayLogs] = useState([]);
-            const [fullLogs, setFullLogs] = useState([]); // Full log history for download
+            const [fullLogs, setFullLogs] = useState([]);
             const [port, setPort] = useState(null);
             const [socket, setSocket] = useState(null);
             const [connectionType, setConnectionType] = useState(null);
+            const [wifiStatus, setWifiStatus] = useState("Not Connected");
+            const [modeConfirmation, setModeConfirmation] = useState(null);
             const [motorTrim, setMotorTrim] = useState([0, 0, 0, 0]);
             const [pidGains, setPidGains] = useState({
                 roll: { kp: 1.0, ki: 0.05, kd: 0.2 },
@@ -91,12 +100,19 @@
                 ws.onopen = () => {
                     setSocket(ws);
                     setConnectionType("WiFi");
+                    setWifiStatus("Connected");
                     ws.send("ping");
-                    setInterval(() => ws.send("get_logs"), 1000); // Fetch logs every second
+                    setInterval(() => ws.send("get_logs"), 1000);
                 };
                 ws.onmessage = (event) => handleData(event.data);
-                ws.onerror = (error) => console.error("WiFi Error:", error);
-                ws.onclose = () => setConnectionType(null);
+                ws.onerror = (error) => {
+                    console.error("WiFi Error:", error);
+                    setWifiStatus("Problem: Connection Lost");
+                };
+                ws.onclose = () => {
+                    setConnectionType(null);
+                    setWifiStatus("Problem: Not Connected");
+                };
             };
 
             // Read from USB port
@@ -123,8 +139,8 @@
                     setTelemetry(parsed);
                 } else if (data.includes("[")) {
                     const newLogs = data.split("\n").filter(line => line.trim());
-                    setDisplayLogs(prev => [...prev, ...newLogs].slice(-20)); // Display last 20
-                    setFullLogs(prev => [...prev, ...newLogs]); // Store all logs
+                    setDisplayLogs(prev => [...prev, ...newLogs].slice(-20));
+                    setFullLogs(prev => [...prev, ...newLogs]);
                     newLogs.forEach(log => {
                         if (log.includes("Trim completed")) {
                             const trimMatch = log.match(/Trim completed: \[(-?\d+), (-?\d+), (-?\d+), (-?\d+)\]/);
@@ -176,7 +192,7 @@
                 return result;
             };
 
-            // Send command
+            // Send command with confirmation for mode buttons
             const sendCommand = async (command) => {
                 if (connectionType === "USB" && port) {
                     const writer = port.writable.getWriter();
@@ -184,6 +200,10 @@
                     writer.releaseLock();
                 } else if (connectionType === "WiFi" && socket) {
                     socket.send(command);
+                }
+                if (["Sluggish", "Neutral", "Agile"].includes(command)) {
+                    setModeConfirmation(`Mode Set: ${command}`);
+                    setTimeout(() => setModeConfirmation(null), 3000); // Clear after 3 seconds
                 }
             };
 
@@ -238,6 +258,9 @@
                                 {connectionType === "WiFi" ? "WiFi Engaged" : "Activate WiFi"}
                             </button>
                         </div>
+                        <p className={`mt-4 text-sm ${wifiStatus === "Connected" ? "text-orange-400" : "text-red-400"}`}>
+                            WiFi Status: {wifiStatus}
+                        </p>
                     </header>
 
                     {/* Main Dashboard */}
@@ -267,6 +290,9 @@
                                     <button onClick={() => sendCommand("Neutral")} className="w-1/3 px-4 py-2 holo-text hover-arc bg-orange-600 rounded-full">Neutral</button>
                                     <button onClick={() => sendCommand("Agile")} className="w-1/3 px-4 py-2 holo-text hover-arc bg-orange-600 rounded-full">Agile</button>
                                 </div>
+                                {modeConfirmation && (
+                                    <p className="text-center text-sm text-orange-400 mt-2 confirmation">{modeConfirmation}</p>
+                                )}
                             </div>
                         </section>
 
