@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AirM Stark GCS</title>
+    <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.development.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.22.9/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes arcPulse {
+            0% { border-color: rgba(255, 75, 0, 0.5); box-shadow: 0 0 10px rgba(255, 75, 0, 0.3); }
+            50% { border-color: rgba(255, 75, 0, 1); box-shadow: 0 0 20px rgba(255, 75, 0, 0.8); }
+            100% { border-color: rgba(255, 75, 0, 0.5); box-shadow: 0 0 10px rgba(255, 75, 0, 0.3); }
+        }
+        @keyframes scan {
+            0% { transform: translateY(-100%); }
+            100% { transform: translateY(100%); }
+        }
+        .stark-bg {
+            background: linear-gradient(180deg, #0a0f1a 0%, #1a2633 100%);
+            overflow: hidden;
+        }
+        .arc-reactor {
+            border: 2px solid rgba(255, 75, 0, 0.7);
+            box-shadow: 0 0 15px rgba(255, 75, 0, 0.5), inset 0 0 10px rgba(255, 75, 0, 0.3);
+            animation: arcPulse 2s infinite;
+        }
+        .holo-text {
+            text-shadow: 0 0 5px rgba(255, 75, 0, 0.8), 0 0 10px rgba(255, 75, 0, 0.5);
+        }
+        .scan-line {
+            position: absolute;
+            width: 100%;
+            height: 2px;
+            background: rgba(255, 75, 0, 0.3);
+            animation: scan 5s infinite linear;
+        }
+        .hover-arc {
+            transition: all 0.3s ease;
+        }
+        .hover-arc:hover {
+            box-shadow: 0 0 25px rgba(255, 75, 0, 1);
+            transform: scale(1.05);
+        }
+    </style>
+</head>
+<body class="stark-bg text-white font-mono min-h-screen relative">
+    <div class="scan-line"></div>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        const GroundControlStation = () => {
+            const [telemetry, setTelemetry] = useState({
+                roll: 0, pitch: 0, yaw: 0, throttle: 0, height: 0, x: 0, y: 0, battery: 100, 
+                m1: 0, m2: 0, m3: 0, m4: 0, warnings: []
+            });
+            const [logs, setLogs] = useState([]);
+            const [port, setPort] = useState(null);
+            const [socket, setSocket] = useState(null);
+            const [connectionType, setConnectionType] = useState(null);
+            const [motorTrim, setMotorTrim] = useState([0, 0, 0, 0]);
+
+            // Connect via USB (WebSerial)
+            const connectUSB = async () => {
+                try {
+                    const serialPort = await navigator.serial.requestPort();
+                    await serialPort.open({ baudRate: 115200 });
+                    setPort(serialPort);
+                    setConnectionType("USB");
+                    readFromPort(serialPort);
+                } catch (error) {
+                    console.error("USB Connection failed:", error);
+                }
+            };
+
+            // Connect via WiFi (WebSocket)
+            const connectWiFi = () => {
+                const ws = new WebSocket('ws://192.168.4.1:8080');
+                ws.onopen = () => {
+                    setSocket(ws);
+                    setConnectionType("WiFi");
+                    ws.send("ping");
+                };
+                ws.onmessage = (event) => handleData(event.data);
+                ws.onerror = (error) => console.error("WiFi Error:", error);
+                ws.onclose = () => setConnectionType(null);
+            };
+
+            // Read from USB port
+            const readFromPort = async (serialPort) => {
+                const reader = serialPort.readable.getReader();
+                try {
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        handleData(new TextDecoder().decode(value).trim());
+                    }
+                } catch (error) {
+                    console.error("Read error:", error);
+                    setConnectionType(null);
+                } finally {
+                    reader.releaseLock();
+                }
+            };
+
+            // Handle incoming data
+            const handleData = (data) => {
+                if (data.includes("Roll:")) {
+                    const parsed = parseTelemetry(data);
+                    setTelemetry(parsed);
+                } else if (data.includes("[")) {
+                    setLogs(prev => [...prev, data].slice(-10));
+                    if (data.includes("Trim completed")) {
+                        const trimMatch = data.match(/Trim completed: \[(-?\d+), (-?\d+), (-?\d+), (-?\d+)\]/);
+                        if (trimMatch) {
+                            setMotorTrim([parseInt(trimMatch[1]), parseInt(trimMatch[2]), parseInt(trimMatch[3]), parseInt(trimMatch[4])]);
+                        }
+                    }
+                }
+            };
+
+            // Parse telemetry string
+            const parseTelemetry = (data) => {
+                const parts = data.split(", ");
+                const result = {};
+                parts.forEach(part => {
+                    const [key, value] = part.split(":");
+                    if (key === "Warnings") {
+                        result.warnings = value.split(";");
+                    } else {
+                        result[key.toLowerCase()] = parseFloat(value) || value;
+                    }
+                });
+                result.m1 = result.m1 || 0;
+                result.m2 = result.m2 || 0;
+                result.m3 = result.m3 || 0;
+                result.m4 = result.m4 || 0;
+                return result;
+            };
+
+            // Send command
+            const sendCommand = async (command) => {
+                if (connectionType === "USB" && port) {
+                    const writer = port.writable.getWriter();
+                    await writer.write(new TextEncoder().encode(command + "\n"));
+                    writer.releaseLock();
+                } else if (connectionType === "WiFi" && socket) {
+                    socket.send(command);
+                }
+            };
+
+            // Fetch logs
+            const fetchLogs = () => sendCommand("get_logs");
+
+            useEffect(() => {
+                return () => {
+                    if (port) port.close();
+                    if (socket) socket.close();
+                };
+            }, [port, socket]);
+
+            return (
+                <div className="container mx-auto p-8 relative z-10">
+                    {/* Header */}
+                    <header className="text-center mb-10">
+                        <h1 className="text-6xl font-bold holo-text">AirM Stark</h1>
+                        <p className="text-lg text-orange-400 mt-2">Repulsor Control System</p>
+                        <div className="mt-6 flex justify-center space-x-6">
+                            <button 
+                                onClick={connectUSB} 
+                                disabled={connectionType} 
+                                className={`px-8 py-3 rounded-full holo-text hover-arc ${connectionType === "USB" ? 'bg-orange-600' : 'bg-gray-800 border border-orange-400'}`}
+                            >
+                                {connectionType === "USB" ? "USB Engaged" : "Activate USB"}
+                            </button>
+                            <button 
+                                onClick={connectWiFi} 
+                                disabled={connectionType} 
+                                className={`px-8 py-3 rounded-full holo-text hover-arc ${connectionType === "WiFi" ? 'bg-orange-600' : 'bg-gray-800 border border-orange-400'}`}
+                            >
+                                {connectionType === "WiFi" ? "WiFi Engaged" : "Activate WiFi"}
+                            </button>
+                        </div>
+                    </header>
+
+                    {/* Main Dashboard */}
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                        {/* Control Panel */}
+                        <section className="bg-gray-800 bg-opacity-70 p-6 rounded-lg arc-reactor">
+                            <h2 className="text-2xl holo-text mb-6 text-center">Flight Controls</h2>
+                            <div className="space-y-4">
+                                <div className="flex justify-between">
+                                    <button onClick={() => sendCommand("Throttle Up")} className="w-1/3 px-4 py-2 holo-text hover-arc bg-gray-700 rounded-full">Thrusters Up</button>
+                                    <button onClick={() => sendCommand("Throttle Down")} className="w-1/3 px-4 py-2 holo-text hover-arc bg-gray-700 rounded-full">Thrusters Down</button>
+                                </div>
+                                <div className="flex justify-between">
+                                    <button onClick={() => sendCommand("Pitch Up")} className="w-1/3 px-4 py-2 holo-text hover-arc bg-gray-700 rounded-full">Pitch Up</button>
+                                    <button onClick={() => sendCommand("Pitch Down")} className="w-1/3 px-4 py-2 holo-text hover-arc bg-gray-700 rounded-full">Pitch Down</button>
+                                </div>
+                                <div className="flex justify-between">
+                                    <button onClick={() => sendCommand("Roll Left")} className="w-1/3 px-4 py-2 holo-text hover-arc bg-gray-700 rounded-full">Roll Left</button>
+                                    <button onClick={() => sendCommand("Roll Right")} className="w-1/3 px-4 py-2 holo-text hover-arc bg-gray-700 rounded-full">Roll Right</button>
+                                </div>
+                                <div className="flex justify-between">
+                                    <button onClick={() => sendCommand("Yaw Left")} className="w-1/3 px-4 py-2 holo-text hover-arc bg-gray-700 rounded-full">Yaw Left</button>
+                                    <button onClick={() => sendCommand("Yaw Right")} className="w-1/3 px-4 py-2 holo-text hover-arc bg-gray-700 rounded-full">Yaw Right</button>
+                                </div>
+                                <div className="flex justify-between">
+                                    <button onClick={() => sendCommand("Sluggish")} className="w-1/3 px-4 py-2 holo-text hover-arc bg-orange-600 rounded-full">Sluggish</button>
+                                    <button onClick={() => sendCommand("Neutral")} className="w-1/3 px-4 py-2 holo-text hover-arc bg-orange-600 rounded-full">Neutral</button>
+                                    <button onClick={() => sendCommand("Agile")} className="w-1/3 px-4 py-2 holo-text hover-arc bg-orange-600 rounded-full">Agile</button>
+                                </div>
+                            </div>
+                        </section>
+
+                        {/* Telemetry & Propulsion */}
+                        <section className="bg-gray-800 bg-opacity-70 p-6 rounded-lg arc-reactor">
+                            <h2 className="text-2xl holo-text mb-6 text-center">Flight Diagnostics</h2>
+                            <div className="space-y-6">
+                                <div>
+                                    <h3 className="text-lg holo-text mb-2">Orientation</h3>
+                                    <div className="grid grid-cols-2 gap-2 text-sm">
+                                        <div>Roll: <span className="text-orange-400">{telemetry.roll.toFixed(1)}°</span></div>
+                                        <div>Pitch: <span className="text-orange-400">{telemetry.pitch.toFixed(1)}°</span></div>
+                                        <div>Yaw: <span className="text-orange-400">{telemetry.yaw.toFixed(1)}°</span></div>
+                                        <div>Throttle: <span className="text-orange-400">{telemetry.throttle}%</span></div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <h3 className="text-lg holo-text mb-2">Position</h3>
+                                    <div className="grid grid-cols-2 gap-2 text-sm">
+                                        <div>Height: <span className="text-orange-400">{telemetry.height.toFixed(2)}m</span></div>
+                                        <div>X: <span className="text-orange-400">{telemetry.x.toFixed(2)}m</span></div>
+                                        <div>Y: <span className="text-orange-400">{telemetry.y.toFixed(2)}m</span></div>
+                                        <div>Battery: <span className="text-orange-400">{telemetry.battery}%</span></div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <h3 className="text-lg holo-text mb-2">Propulsion</h3>
+                                    <div className="space-y-2 text-sm">
+                                        {['m1', 'm2', 'm3', 'm4'].map((m, i) => (
+                                            <div key={m}>
+                                                M{i + 1}: <span className="text-orange-400">{Math.round(telemetry[m] / 655.35)}%</span>
+                                                <div className="w-full bg-gray-600 h-2 rounded">
+                                                    <div className="bg-orange-400 h-2 rounded" style={{ width: `${(telemetry[m] / 65535 * 100)}%` }}></div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+
+                        {/* Auto-Tuning & Alerts */}
+                        <section className="bg-gray-800 bg-opacity-70 p-6 rounded-lg arc-reactor">
+                            <h2 className="text-2xl holo-text mb-6 text-center">System Status</h2>
+                            <div className="space-y-6">
+                                <div>
+                                    <h3 className="text-lg holo-text mb-2">Auto-Tuning</h3>
+                                    <div className="grid grid-cols-2 gap-2 text-sm">
+                                        {motorTrim.map((trim, i) => (
+                                            <div key={i}>Trim M{i + 1}: <span className="text-orange-400">{trim}</span></div>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div>
+                                    <h3 className="text-lg holo-text mb-2">Alerts</h3>
+                                    <ul className="text-sm text-red-400">
+                                        {telemetry.warnings.length ? telemetry.warnings.map((warn, idx) => (
+                                            <li key={idx}>{warn}</li>
+                                        )) : <li className="text-orange-400">Systems Optimal</li>}
+                                    </ul>
+                                </div>
+                            </div>
+                        </section>
+                    </div>
+
+                    {/* Logs */}
+                    <section className="mt-8 bg-gray-800 bg-opacity-70 p-6 rounded-lg arc-reactor">
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-2xl holo-text">Mission Log</h2>
+                            <button 
+                                onClick={fetchLogs} 
+                                className="px-6 py-2 holo-text hover-arc bg-gray-700 rounded-full"
+                            >
+                                Update Log
+                            </button>
+                        </div>
+                        <div className="h-24 overflow-y-auto text-sm">
+                            {logs.map((log, idx) => (
+                                <p key={idx} className="text-orange-400 border-b border-gray-600 py-1">{log}</p>
+                            ))}
+                        </div>
+                    </section>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<GroundControlStation />);
+    </script>
+</body>
+</html>
